@@ -1,5 +1,7 @@
 //
 // Created by liuzikai on 10/9/20.
+// 
+// Modified by Tianyu Zhang on 03/23/2023
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
@@ -14,6 +16,8 @@
 #include <fstream>
 
 namespace klc3 {
+
+// =================== LLVM options ====================== //
 
 llvm::cl::opt<bool> GenerateDotForImages(
         "generate-dot-for-images",
@@ -33,6 +37,8 @@ llvm::cl::opt<bool> ShowLineNumber(
         llvm::cl::desc("Show line number in the flow graph (default=true)"),
         llvm::cl::init(true),
         llvm::cl::cat(KLC3VisualizationCat));
+
+// ======================= Compression ========================== //
 
 void FlowGraphVisualizer::mergeVisualNodes(VisualNode *dest, VisualNode *src) {
     if (dest == src) return;
@@ -147,6 +153,8 @@ void FlowGraphVisualizer::compress() {
     compressed = true;
 }
 
+// ==================== Constructor and Destructor ============= //
+
 FlowGraphVisualizer::~FlowGraphVisualizer() {
     for (auto node: vNodes) delete node;
     for (auto edge: vEdges) delete edge;
@@ -237,6 +245,103 @@ FlowGraphVisualizer::FlowGraphVisualizer(const FlowGraph *fg) : fg(fg) {
     }
 }
 
+// 03/23/2023
+// Added by Tianyu
+// Backbone constructor
+FlowGraphVisualizer::FlowGraphVisualizer(const BackBoneAnalyzer *bba) : bba(bba) {
+
+    // First pass: build all nodes
+    for (const auto &backBoneNode : bba->getAllBackBoneNodes()) {
+
+        Node *entryNode = backBoneNode->entryNode();
+        auto *vNode = new VisualNode;
+
+        // Keep these fixed as zikai's
+        if (entryNode->possibleRETPoint) {
+            vNode->notMergeAhead = true;
+        }
+        if (!entryNode->inst().isNull() && isSpecialInst(entryNode->inst()->instID())) {
+            vNode->notMergeAfterward = true;
+        }
+        vNode->order = entryNode->addr() * 2;  // use address * 2 as order, so that we can put halt entryNode in between
+        vNode->label = join("/", entryNode->inst()->labels);
+
+        // We want the node label as content here
+        if (ShowLineNumber) {
+            vNode->contentLines.emplace_back(
+                    rightPadding(std::to_string(entryNode->inst()->sourceLine), 3, ' ') + " " + entryNode->name()
+            );
+            // Add loop info basic
+            stringstream ss;
+            backBoneNode->la->dumpToString(ss);
+            llvm::outs() << ss.str();
+            vNode->contentLines.emplace_back(ss.str());
+        } else {
+            vNode->contentLines.emplace_back(entryNode->name());
+        }
+        if (entryNode->subroutineEntry) {
+            // It's the entry point of a subroutine, do not force to position
+            vNode->detachedPosition = true;
+        }
+        // Until here
+
+        vNodes.emplace(vNode);
+        nodeToVNode[entryNode] = vNode;
+    }
+
+    // Second pass: build all edges and halt nodes
+    for (const auto &backBoneNode : bba->getAllBackBoneNodes()) {
+        for (const auto &edge : backBoneNode->OutEdges()) {
+
+            assert(edge->from() != nullptr && "Out edge should have from node");
+
+            // For backbone, the visual edge should connect two BackBoneNodes
+            auto *vEdge = new VisualEdge;
+            vEdge->from = nodeToVNode[backBoneNode->entryNode()];
+            vEdge->from->outEdges.emplace_back(vEdge);
+
+            // TODO:
+            // Right now, should not have edge->to() == nullptr case
+            if (edge->to() == nullptr) {
+                // Create a virtual halt entryNode
+                auto *haltNode = new VisualNode;
+                haltNode->order = vEdge->from->order + 1;  // normal entryNode use addr * 2 as order, leaving space for halt entryNode
+                haltNode->label = "(halt)";
+                haltNode->simpleStyle = "dashed";
+                haltNode->notMergeAhead = true;
+                vNodes.emplace(haltNode);
+
+                vEdge->to = haltNode;
+            } else {
+                Node *dest_entry_node = bba->getBackBoneVisitedMap().find(edge->to())->second->entryNode();
+                vEdge->to = nodeToVNode[dest_entry_node];
+            }
+            vEdge->to->inEdges.emplace_back(vEdge);
+            vEdge->attrs.emplace("constraint", "false");  // these edges don't enforce entryNode position
+
+            // Fix these as zikai's
+            if (edge->type() == Edge::JSR_EDGE || edge->type() == Edge::RET_EDGE || edge->type() == Edge::JSRR_EDGE ||
+                edge->type() == Edge::SUBROUTINE_VIRTUAL_EDGE ||
+                edge->type() == Edge::LOOP_H2H_EDGE || edge->type() == Edge::LOOP_H2X_EDGE) {
+                vEdge->notMerge = true;
+            }
+            if (edge->type() == Edge::LOOP_H2H_EDGE || edge->type() == Edge::LOOP_H2X_EDGE) {
+                vEdge->visible = false;
+                vEdge->style = "dotted";
+            } else if (edge->type() == Edge::SUBROUTINE_VIRTUAL_EDGE) {
+                vEdge->visible = false;
+                vEdge->style = "dashed";
+            } else if (edge->type() == Edge::INIT_PC_ENTRY_EDGE) {
+                vEdge->style = "dashed";
+            }
+            vEdges.emplace(vEdge);
+            edgeToVEdge[edge] = vEdge;
+        }
+    }
+}
+
+// ===================== Manipulation on the whole flowgraph =============== //
+
 bool FlowGraphVisualizer::isSpecialInst(InstValue::InstID inst) {
     switch (inst) {
         case InstValue::InstID::BR :
@@ -298,6 +403,161 @@ void FlowGraphVisualizer::drawGlobalCoverage(const CoverageTracker *ct, uint16_t
     }
 }
 
+// =============== Generate graph for visualization ================ //
+
+// 
+// 3/15/2023
+// Tianyu
+// 
+// Program coverage with all nodes abstracted
+void FlowGraphVisualizer::generateBasicBlocks(const string &outputBaseName) {
+
+    dotNodeCount = 0;
+    dotClusterCount = 0;
+    completedLayers.clear();
+    for (auto &node: vNodes) node->postOrderGenerated = false;
+    for (auto &edge: vEdges) edge->generated = false;
+
+    std::stringstream g;
+
+    g << "digraph \"" << "klc3" << "\" {\n";
+    generateBasicBlockLayer(g, &topLayer);
+    g << "}";
+
+#if 0
+    llvm::outs() << g.str();
+#endif
+
+    g << "\n";
+
+    generateGraphvizImage(g.str(), outputBaseName);
+}
+
+void FlowGraphVisualizer::generateBasicBlockLayer(std::stringstream &g, VisualLayer *layer) {
+
+    // Go into sublayers first
+    for (auto sublayer : layer->subLayers()) {
+        sublayer->visualizeName = "cluster_" + std::to_string(dotClusterCount++);
+        // Write subgraph bracket outside to handle top-level graph in genreate()
+        g << "subgraph " << sublayer->visualizeName << " { // " << sublayer->name << "\n";
+        generateLayer(g, sublayer);
+        g << "}\n";
+    }
+
+    // Nodes
+    dotWriteEntry(g, "node", {
+            {"forcelabels", "true"},
+            {"shape",       "none"}
+    });
+    for (auto &node : vNodes) {
+        if (!node->visible) continue;
+        if (nodeParent[node] != layer) continue;
+
+        // Allocate name
+        node->visualizeName = "N" + std::to_string(dotNodeCount++);
+
+        if (node->simpleStyle.empty()) {
+
+            stringstream ss;
+            ss << R"(<<TABLE BORDER="0" CELLBORDER="0">)";
+            {
+                ss << "<TR>";
+                {
+                    // ss << "<TD VALIGN=\"TOP\">";
+                    // if (!node->labelColor.empty()) ss << "<FONT COLOR=\"" << node->labelColor << "\">";
+                    // if (node->labelBold) ss << "<B>";
+                    // if (node->labelUnderline) ss << "<U>";
+                    // ss << node->label << " ";
+                    // if (node->labelUnderline) ss << "</U>";
+                    // if (node->labelBold) ss << "</B>";
+                    // if (!node->labelColor.empty()) ss << "</FONT>";
+                    // ss << "</TD>";
+
+                    // for (const auto &color : node->blockColors) {
+                    //     ss << "<TD BGCOLOR=\"" << color << "\"> </TD>";
+                    // }
+
+                    ss << R"(<TD ALIGN="LEFT" BALIGN="LEFT">)";
+                    if (!node->contentColor.empty()) ss << "<FONT COLOR=\"" << node->contentColor << "\">";
+                    // ss << join("<BR/>", node->contentLines);
+
+                    // We only want the node name here
+                    ss << "<BR/>" << node->visualizeName;
+
+                    if (!node->contentColor.empty()) ss << "</FONT>";
+                    ss << "</TD>";
+                }
+                ss << "</TR>";
+            }
+            ss << "</TABLE>>";
+
+            dotWriteEntry(g,
+                          node->visualizeName,
+                          {{"label", ss.str()}});
+
+        } else {
+
+            dotWriteEntry(g,
+                          node->visualizeName,
+                          {{"label", "\"" + node->label + "\""},
+                           {"style", node->simpleStyle}});
+
+        }
+    }
+
+    // Add hidden edge to maintain order of code
+    for (auto it = vNodes.begin(); it != vNodes.end(); ++it) {
+        auto it2 = std::next(it);
+        if (it2 == vNodes.end()) continue;
+        VisualNode *u = *it, *v = *it2;
+        if (u->postOrderGenerated) continue;  // already generated
+        if (!u->visible || !v->visible) continue;
+        if (v->detachedPosition) continue;
+
+        // Draw edge at the inner-most common parent layer of two nodes, when both layers are currentLayer or completed
+        VisualLayer *uLayer = nodeParent[u], *vLayer = nodeParent[v];
+        if ((uLayer == layer && vLayer == layer) ||
+            (completedLayers.find(uLayer) != completedLayers.end() &&
+             completedLayers.find(vLayer) != completedLayers.end())) {
+
+            dotWriteEntry(g, u->visualizeName + "->" + v->visualizeName, {{"style", "invis"}});
+            u->postOrderGenerated = true;
+        }
+    }
+
+    // Edges
+    for (auto &edge : vEdges) {
+        if (edge->generated) continue;  // already generated
+        if (!edge->visible) continue;
+        if (!edge->from->visible) continue;
+        if (!edge->to->visible) continue;
+        // Draw edge at the inner-most common parent layer of two nodes, when both layers are currentLayer or completed
+        VisualLayer *fromLayer = nodeParent[edge->from], *toLayer = nodeParent[edge->to];
+        if ((fromLayer == layer && toLayer == layer) ||
+            (completedLayers.find(fromLayer) != completedLayers.end() &&
+             completedLayers.find(toLayer) != completedLayers.end())) {
+
+            auto attrs = edge->attrs;
+            if (!edge->colors.empty()) {
+                attrs["color"] = "\"" + join(":invis:", edge->colors) + "\"";
+            }
+            if (edge->width != 1) {
+                attrs["penwidth"] = std::to_string(edge->width);
+            }
+            if (!edge->style.empty()) {
+                attrs["style"] = edge->style;
+            }
+
+            dotWriteEntry(g, edge->from->visualizeName + "->" + edge->to->visualizeName, attrs);
+            edge->generated = true;
+        }
+    }
+
+    completedLayers.emplace(layer);
+}
+
+
+// For the program coverage
 void FlowGraphVisualizer::generate(const string &outputBaseName) {
 
     dotNodeCount = 0;
@@ -440,6 +700,198 @@ void FlowGraphVisualizer::generateLayer(std::stringstream &g, VisualLayer *layer
     completedLayers.emplace(layer);
 }
 
+//
+// Added by Tianyu
+//
+// For only loop relative position
+void FlowGraphVisualizer::generateLoopAbstraction(const string &outputBaseName, const LoopAnalyzer *loopAnalyzer) {
+
+    dotNodeCount = 0;
+    dotClusterCount = 0;
+    completedLayers.clear();
+    for (auto &node: vNodes) node->postOrderGenerated = false;
+    for (auto &edge: vEdges) edge->generated = false;
+
+    std::stringstream g;
+
+    g << "digraph \"" << "klc3" << "\" {\n";
+    generateLoops(g, loopAnalyzer->getTopLevelLoops());
+    g << "}";
+
+// #if 0
+    llvm::outs() << g.str();
+// #endif
+
+    g << "\n";
+
+    generateGraphvizImage(g.str(), outputBaseName);
+}
+
+void FlowGraphVisualizer::generateLoops(std::stringstream &g, std::set<Loop *> topLoops) {
+
+    // Go into toplevel loops first
+    for (auto topLoop : topLoops) {
+        // Nodes
+        dotWriteEntry(g, "node", {
+                {"forcelabels", "true"},
+                {"shape",       "none"}
+        });
+
+        // Allocate name
+        string nodeName = "N" + std::to_string(dotNodeCount++);
+        stringstream ss;
+            ss << R"(<<TABLE BORDER="0" CELLBORDER="0">)";
+            {
+                ss << "<TR>";
+                {
+                    ss << R"(<TD ALIGN="LEFT" BALIGN="LEFT">)";
+                    ss << topLoop->name() << " Begin";
+                    ss << "</TD>";
+                }
+                ss << "</TR>";
+            }
+            ss << "</TABLE>>";
+
+        dotWriteEntry(g, nodeName, {{"label", ss.str()}});
+
+        // Go to subloops then
+        generateLoops(g, topLoop->subloops());
+
+        nodeName = "N" + std::to_string(dotNodeCount++);
+        ss.clear();
+        ss.str("");
+            ss << R"(<<TABLE BORDER="0" CELLBORDER="0">)";
+            {
+                ss << "<TR>";
+                {
+                    ss << R"(<TD ALIGN="LEFT" BALIGN="LEFT">)";
+                    ss << topLoop->name() << " End";
+                    ss << "</TD>";
+                }
+                ss << "</TR>";
+            }
+            ss << "</TABLE>>";
+
+        dotWriteEntry(g, nodeName, {{"label", ss.str()}});
+    }
+}
+
+
+// Added by Tianyu
+// 3/20/2023
+// For backbone structure
+void FlowGraphVisualizer::generateBackBoneWrapper(const string &outputBaseName) {
+    dotNodeCount = 0;
+    dotClusterCount = 0;
+    std::stringstream g;
+
+    g << "digraph \"" << "klc3" << "\" {\n";
+    generateBackBoneMain(g);
+    g << "}";
+
+#if 1
+    llvm::outs() << g.str();
+#endif
+
+    g << "\n";
+
+    generateGraphvizImage(g.str(), outputBaseName);
+}
+
+// Added by Tianyu
+// 3/20/2023
+// For backbone structure
+void FlowGraphVisualizer::generateBackBoneMain(std::stringstream &g) {
+
+    // Nodes
+    dotWriteEntry(g, "node", {
+            {"forcelabels", "true"},
+            {"shape",       "none"}
+    });
+    for (auto &node : vNodes) {
+        if (!node->visible) continue;
+
+        // Allocate name
+        node->visualizeName = "N" + std::to_string(dotNodeCount++);
+
+        if (node->simpleStyle.empty()) {
+
+            stringstream ss;
+            ss << R"(<<TABLE BORDER="0" CELLBORDER="0">)";
+            {
+                ss << "<TR>";
+                {
+                    ss << "<TD VALIGN=\"TOP\">";
+                    if (!node->labelColor.empty()) ss << "<FONT COLOR=\"" << node->labelColor << "\">";
+                    if (node->labelBold) ss << "<B>";
+                    if (node->labelUnderline) ss << "<U>";
+                    ss << node->label << " ";
+                    if (node->labelUnderline) ss << "</U>";
+                    if (node->labelBold) ss << "</B>";
+                    if (!node->labelColor.empty()) ss << "</FONT>";
+                    ss << "</TD>";
+
+                    for (const auto &color : node->blockColors) {
+                        ss << "<TD BGCOLOR=\"" << color << "\"> </TD>";
+                    }
+
+                    ss << R"(<TD ALIGN="LEFT" BALIGN="LEFT">)";
+                    if (!node->contentColor.empty()) ss << "<FONT COLOR=\"" << node->contentColor << "\">";
+                    ss << join("<BR/>", node->contentLines);
+                    if (!node->contentColor.empty()) ss << "</FONT>";
+                    ss << "</TD>";
+                }
+                ss << "</TR>";
+            }
+            ss << "</TABLE>>";
+
+            dotWriteEntry(g,
+                          node->visualizeName,
+                          {{"label", ss.str()}});
+        } else {
+
+            dotWriteEntry(g,
+                          node->visualizeName,
+                          {{"label", "\"" + node->label + "\""},
+                           {"style", node->simpleStyle}});
+        }
+    }
+
+    // Add hidden edge to maintain order of code
+    for (auto it = vNodes.begin(); it != vNodes.end(); ++it) {
+        auto it2 = std::next(it);
+        if (it2 == vNodes.end()) continue;
+        VisualNode *u = *it, *v = *it2;
+        if (u->postOrderGenerated) continue;  // already generated
+        if (!u->visible || !v->visible) continue;
+        if (v->detachedPosition) continue;
+
+        dotWriteEntry(g, u->visualizeName + "->" + v->visualizeName, {{"style", "invis"}});
+    }
+
+    // Edges
+    for (auto &edge : vEdges) {
+        if (edge->generated) continue;  // already generated
+        if (!edge->visible) continue;
+        if (!edge->from->visible) continue;
+        if (!edge->to->visible) continue;
+
+        auto attrs = edge->attrs;
+        if (!edge->colors.empty()) {
+            attrs["color"] = "\"" + join(":invis:", edge->colors) + "\"";
+        }
+        if (edge->width != 1) {
+            attrs["penwidth"] = std::to_string(edge->width);
+        }
+        if (!edge->style.empty()) {
+            attrs["style"] = edge->style;
+        }
+
+        dotWriteEntry(g, edge->from->visualizeName + "->" + edge->to->visualizeName, attrs);
+        edge->generated = true;
+    }
+}
+
 void FlowGraphVisualizer::dotWriteEntry(std::stringstream &g, const string &name,
                                         const unordered_map<string, string> &attrs) {
     g << name << '[';
@@ -491,6 +943,9 @@ void FlowGraphVisualizer::showOnlySubgraph(const Subgraph &sg) {
     }
 }
 
+
+// ========= Functions to be called by klc3 directly to build images ====== //
+
 void FlowGraphVisualizer::visualizeLoop(const PathString &outputPath, const string &filename,
                                         const FlowGraph *flowGraph, const Loop *loop, const string &loopColor) {
     auto v2 = std::make_unique<FlowGraphVisualizer>(flowGraph);
@@ -526,6 +981,33 @@ void FlowGraphVisualizer::visualizeLoop(const PathString &outputPath, const stri
     v2->generate(outputFilename.c_str());
 }
 
+
+void FlowGraphVisualizer::abstractAllLoops(const PathString &outputPath, const FlowGraph *flowGraph,
+                                            const LoopAnalyzer *loopAnalyzer) {
+    auto v1 = std::make_unique<FlowGraphVisualizer>(flowGraph);
+
+    auto allLoops = loopAnalyzer->getAllLoops();
+    FlowGraphVisualizer::ColorAllocator<Loop *> ca1(allLoops.size());
+
+    // Color all nodes
+    for (const auto &loop : allLoops) {
+        const string &loopColor = ca1.matchColor(loop);
+        v1->nodeSetLabelColor(loop->entryNode(), loopColor);
+        v1->nodeSetLabelBold(loop->entryNode(), true);
+        v1->nodeSetLabelUnderline(loop->entryNode(), true);
+        for (const auto &node : loop->nodes()) {
+            v1->nodeAppendBlockColor(node, loopColor);
+        }
+    }
+
+    v1->compress();
+    PathString compressedFlowGraphFilename(outputPath);
+    llvm::sys::path::append(compressedFlowGraphFilename, "loops-ABS");
+    v1->generateLoopAbstraction(compressedFlowGraphFilename.c_str(), loopAnalyzer);
+
+    v1.reset();
+}
+
 void FlowGraphVisualizer::visualizeAllLoops(const PathString &outputPath, const FlowGraph *flowGraph,
                                             const LoopAnalyzer *loopAnalyzer) {
 
@@ -559,6 +1041,17 @@ void FlowGraphVisualizer::visualizeAllLoops(const PathString &outputPath, const 
     }
 }
 
+
+// Added by Tianyu
+// 3/20/2023
+// Output backbone.png/dot
+void FlowGraphVisualizer::visualizeBackBone(const PathString& outputPath, const BackBoneAnalyzer *bba) {
+    PathString backBoneFilename(outputPath);
+    // llvm::sys::path::append(backBoneFilename, "backbone");
+    auto visualizer = std::make_unique<FlowGraphVisualizer>(bba);
+    visualizer->generateBackBoneWrapper(backBoneFilename.c_str());
+}
+
 void FlowGraphVisualizer::visualizeCoverage(const PathString &outputPath, const FlowGraph *flowGraph,
                                             const CoverageTracker *coverageTracker) {
 
@@ -570,6 +1063,12 @@ void FlowGraphVisualizer::visualizeCoverage(const PathString &outputPath, const 
     visualizer->compress();
     visualizer->generate(compressedFlowGraphFilename.c_str());
 
+
+    // Added by Tianyu 
+    // 3/15/2023
+    PathString basicBlockFlowGraphFilename(outputPath);
+    llvm::sys::path::append(basicBlockFlowGraphFilename, "basic_block");
+    visualizer->generateBasicBlocks(basicBlockFlowGraphFilename.c_str());
 }
 
 void FlowGraphVisualizer::visualizeStatePaths(const PathString &outputPath, const string &filename,

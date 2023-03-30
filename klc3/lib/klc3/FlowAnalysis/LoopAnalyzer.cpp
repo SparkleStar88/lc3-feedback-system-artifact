@@ -289,6 +289,19 @@ void LoopAnalyzer::dump(llvm::raw_ostream &os) const {
     os << "Total loop count: " << loops.size() << "\n";
     os << "Max loop depth: " << maxDepth << "\n";
 
+    //
+    // Added by Tianyu
+    // We want more info here
+    //
+    int loopNumWithOUT = 0;
+    for (auto &l : loops) {
+        // if (l.second->hasOUT() && l.second->h2hSegments().size() == 1 && l.second->h2hEdges().size() == 1) {
+        if (l.second->hasOUT() && l.second->h2hSegments().size() == 1) {
+            loopNumWithOUT++;
+        }
+    }
+    os << "Total loop count without OUT single loops: " << loops.size() - loopNumWithOUT << "\n";
+
     for (const auto &it : loops) {
         h2hCount += it.second->h2hSegments().size();
         h2xCount += it.second->h2xSegments().size();
@@ -300,13 +313,121 @@ void LoopAnalyzer::dump(llvm::raw_ostream &os) const {
 void LoopAnalyzer::dumpLoops(llvm::raw_ostream &os, const set<Loop *> &ls, const string &indent, int depth, int *maxDepth) const {
     if (maxDepth && *maxDepth < depth) *maxDepth = depth;
     for (const auto &loop : ls) {
+        //
+        // Added by Tianyu
+        //
+        // Check for OUT instructions inside the loop but not subloops?
+        for (auto &n : loop->nodes()) {
+            ref<InstValue> ir = n->inst();
+            if (ir->instID() == InstValue::TRAP && ir->vec8() == InstValue::VEC8_OUT) {
+                loop->setOUT();
+                break;
+            }
+        }
+
+        //
+        // Modified by Tianyu
+        // We want more info here
+        //
         os << indent << "-> " << loop->name() << "\n";
-        os << indent << "    Size: " << loop->nodes().size() << "\n";
+        os << indent << "    Entry point: " << loop->entryNode()->addr() << "\n";
+        os << indent << "    Num of lines count: " << loop->nodes().size() << "\n";
+        // os << indent << "    Parent loop: " << loop->nodes().size() << "\n";
+        os << indent << "    Subloop count: " << loop->subloops().size() << "\n";
+        os << indent << "    Depth: " << depth << "\n";
+
         os << indent << "    H2H segment count: " << loop->h2hSegments().size() << "\n";
         os << indent << "    H2H edge count: " << loop->h2hEdges().size() << "\n";
         os << indent << "    H2X segment count: " << loop->h2xSegments().size() << "\n";
         os << indent << "    H2X edge count: " << loop->h2xEdges().size() << "\n";
+
+        os << indent << "    Has OUT instruction: " << loop->hasOUT() << "\n";
+
+        // os << indent << "-> " << loop->name() << "\n";
+        // os << indent << "    Size: " << loop->nodes().size() << "\n";
+        // os << indent << "    H2H segment count: " << loop->h2hSegments().size() << "\n";
+        // os << indent << "    H2H edge count: " << loop->h2hEdges().size() << "\n";
+        // os << indent << "    H2X segment count: " << loop->h2xSegments().size() << "\n";
+        // os << indent << "    H2X edge count: " << loop->h2xEdges().size() << "\n";
+
         dumpLoops(os, loop->subloops(), indent + "    ", depth + 1, maxDepth);
+    }
+}
+
+// 
+// Added by Tianyu
+void LoopAnalyzer::dumpToString(stringstream &ss) {
+    int maxDepth = 0;
+    // int h2hCount = 0, h2xCount = 0;
+
+    dumpToStringLoops(ss, topLevelLoops, "", 0, &maxDepth);
+
+    ss << "Total loop count: " << loops.size() << "\n";
+    ss << "Max loop depth: " << maxDepth << "\n";
+
+    //
+    // Added by Tianyu
+    // We want more info here
+    //
+    // int loopNumWithOUT = 0;
+    // for (auto &l : loops) {
+    //     // if (l.second->hasOUT() && l.second->h2hSegments().size() == 1 && l.second->h2hEdges().size() == 1) {
+    //     if (l.second->hasOUT() && l.second->h2hSegments().size() == 1) {
+    //         loopNumWithOUT++;
+    //     }
+    // }
+    // ss << "Total loop count without OUT single loops: " << loops.size() - loopNumWithOUT << "\n";
+
+    // for (const auto &it : loops) {
+    //     h2hCount += it.second->h2hSegments().size();
+    //     h2xCount += it.second->h2xSegments().size();
+    // }
+    // ss << "Total H2H count: " << h2hCount << "\n";
+    // ss << "Total H2X count: " << h2xCount << "\n";
+
+}
+
+void LoopAnalyzer::dumpToStringLoops(stringstream &ss, const set<Loop *> &ls, const string &indent, int depth, int *maxDepth) const {
+    if (maxDepth && *maxDepth < depth) *maxDepth = depth;
+    for (const auto &loop : ls) {
+        //
+        // Added by Tianyu
+        //
+        // Check for OUT instructions inside the loop but not subloops?
+        // for (auto &n : loop->nodes()) {
+        //     ref<InstValue> ir = n->inst();
+        //     if (ir->instID() == InstValue::TRAP && ir->vec8() == InstValue::VEC8_OUT) {
+        //         loop->setOUT();
+        //         break;
+        //     }
+        // }
+
+        //
+        // Modified by Tianyu
+        // We want more info here
+        //
+        // ss << indent << "-> " << loop->name() << "\n";
+        // ss << indent << "    Entry point: " << loop->entryNode()->addr() << "\n";
+        // ss << indent << "    Num of lines count: " << loop->nodes().size() << "\n";
+        // // os << indent << "    Parent loop: " << loop->nodes().size() << "\n";
+        // ss << indent << "    Subloop count: " << loop->subloops().size() << "\n";
+        // ss << indent << "    Depth: " << depth << "\n";
+
+        // ss << indent << "    H2H segment count: " << loop->h2hSegments().size() << "\n";
+        // ss << indent << "    H2H edge count: " << loop->h2hEdges().size() << "\n";
+        // ss << indent << "    H2X segment count: " << loop->h2xSegments().size() << "\n";
+        // ss << indent << "    H2X edge count: " << loop->h2xEdges().size() << "\n";
+
+        // ss << indent << "    Has OUT instruction: " << loop->hasOUT() << "\n";
+
+        // os << indent << "-> " << loop->name() << "\n";
+        // os << indent << "    Size: " << loop->nodes().size() << "\n";
+        // os << indent << "    H2H segment count: " << loop->h2hSegments().size() << "\n";
+        // os << indent << "    H2H edge count: " << loop->h2hEdges().size() << "\n";
+        // os << indent << "    H2X segment count: " << loop->h2xSegments().size() << "\n";
+        // os << indent << "    H2X edge count: " << loop->h2xEdges().size() << "\n";
+
+        dumpToStringLoops(ss, loop->subloops(), indent + "    ", depth + 1, maxDepth);
     }
 }
 

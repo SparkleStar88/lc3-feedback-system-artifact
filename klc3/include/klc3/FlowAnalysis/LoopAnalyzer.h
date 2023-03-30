@@ -24,6 +24,12 @@ public:
 
     const set<Loop *> &subloops() const { return subloops_; }
 
+    //
+    // Added by Tianyu
+    //
+    bool hasOUT() const { return has_OUT; }
+    void setOUT() { has_OUT = true; }
+
     /**
      * Note: a segment is stored as a Path (a vector of Edge) with reduced edges. The first edge, guiding edges, and
      * the last edge are stored, while the other edges are not necessary to infer the path.
@@ -61,6 +67,11 @@ protected:
 
     set<Path> h2xSegments_;
     set<Edge *> h2xEdges_;
+    //
+    // Added by Tianyu
+    //
+    // Check if the loop has OUT instruction
+    bool has_OUT = false;
 
     unordered_set<Edge *> segmentLastEdges_;
 };
@@ -94,6 +105,9 @@ public:
     int getTotalSegmentCount() const { return totalSegmentCount; }
 
     void dump(llvm::raw_ostream &os) const;
+
+    // Added by Tianyu
+    void dumpToString(stringstream &ss);
 
 private:
 
@@ -133,6 +147,9 @@ private:
     bool analyzeLoopDFS(Node *curNode, SCCSubgraph &ssg, Loop &outerLoop, Path &pathFromEntry);
 
     void dumpLoops(llvm::raw_ostream &os, const set<Loop *> &loops, const string &indent, int depth, int *maxDepth) const;
+
+    // Added By Tianyu
+    void dumpToStringLoops(stringstream &ss, const set<Loop *> &ls, const string &indent, int depth, int *maxDepth) const;
 
     static bool existingLoopCanBeSubloop(const Loop *loop, const SCCSubgraph &ssg);
 

@@ -1,5 +1,7 @@
 //
 // Created by liuzikai on 10/9/20.
+// 
+// Modified by Tianyu Zhang on 03/20/23
 //
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
@@ -11,6 +13,7 @@
 #include "FlowGraph.h"
 #include "CoverageTracker.h"
 #include "LoopAnalyzer.h"
+#include "BackBoneAnalyzer.h"
 
 namespace klc3 {
 
@@ -19,15 +22,24 @@ class Edge;
 
 class LoopAnalyzer;
 class CoverageTracker;
+class BackBoneAnalyzer;
 
 class FlowGraphVisualizer {
 public:
 
+// ==================== Constructors and Destructors =============== //
+
     explicit FlowGraphVisualizer(const FlowGraph *fg);
+
+    // Tianyu added
+    // For backbone structure
+    explicit FlowGraphVisualizer(const BackBoneAnalyzer *bba);
 
     FlowGraphVisualizer(const FlowGraphVisualizer &) = delete;
 
     ~FlowGraphVisualizer();
+
+// ==================== VNode Attribute Update ===================== //
 
     void nodeAppendBlockColor(Node *node, const string &color) { nodeToVNode[node]->blockColors.emplace(color); }
 
@@ -49,6 +61,8 @@ public:
 
     void edgeSetVisible(Edge *edge, bool visible) { edgeToVEdge[edge]->visible = visible; }
 
+// ===================== Manipulation on the whole flowgraph =============== //
+
     void colorBasedOnSubroutines();
 
     void drawGlobalCoverage(const CoverageTracker *ct, uint16_t initPC);
@@ -57,7 +71,26 @@ public:
 
     void compress();
 
+// ===================== Generate the dot graph for visualization ========== //
+
+    // For the program coverage
     void generate(const string &outputBaseName);
+
+    // Added by Tianyu
+    // For only loop relative position
+    void generateLoopAbstraction(const string &outputBaseName, const LoopAnalyzer *loopAnalyzer);
+
+    // Added by Tianyu
+    // 3/15/2023
+    // Program coverage with all nodes abstracted
+    void generateBasicBlocks(const string &outputBaseName);
+
+    // Added by Tianyu
+    // 3/20/2023
+    // For backbone structure
+    void generateBackBoneWrapper(const string &outputBaseName);
+
+// ==================== Color Stuff ====================== //
 
     template<typename T>
     class ColorAllocator {
@@ -98,6 +131,8 @@ public:
         map<T, size_t> colorMap;
     };
 
+// ========= Functions to be called by klc3 directly to build images ====== //
+
     // Output png/dot with given path and filename
     static void visualizeLoop(const PathString &outputPath, const string &filename,
                               const FlowGraph *flowGraph, const Loop *loop, const string &color = "/set28/1");
@@ -105,6 +140,16 @@ public:
     // Output loops.png/dot & loop-LOOP_NAME.png/dot for each loop
     static void visualizeAllLoops(const PathString& outputPath,
                                   const FlowGraph *flowGraph, const LoopAnalyzer *loopAnalyzer);
+
+    // Added by Tianyu
+    // Output loops-ABS.png
+    static void abstractAllLoops(const PathString &outputPath,
+                                 const FlowGraph *flowGraph, const LoopAnalyzer *loopAnalyzer);
+
+    // Added by Tianyu
+    // 3/20/2023
+    // Output backbone.png/dot
+    static void visualizeBackBone(const PathString& outputPath, const BackBoneAnalyzer *bba);
 
     // Output coverage.png/dot
     static void visualizeCoverage(const PathString& outputPath,
@@ -117,6 +162,8 @@ public:
 private:
 
     const FlowGraph *fg;
+
+    const BackBoneAnalyzer *bba;
 
     class VisualNode;
 
@@ -210,6 +257,8 @@ private:
         friend void FlowGraphVisualizer::compress();
     };
 
+    // ================================ Organization ================================
+
     set<VisualNode *, VisualNodeLess> vNodes;  // holds lifecycle
     unordered_set<VisualEdge *> vEdges;        // holds lifecycle
 
@@ -242,18 +291,31 @@ private:
 
     static bool isSpecialInst(InstValue::InstID inst);
 
-    // ================================ Organization ================================
-
     // ================================ Visualization ================================
 
     int dotNodeCount = 0;
     int dotClusterCount = 0;
     unordered_set<VisualLayer *> completedLayers;  // layers that has finished generating all nodes
 
+    // Added by Tianyu
+    // For loop abstraction
+    void generateLoops(std::stringstream &g, std::set<Loop *> topLoops);
+
+    // Added by Tianyu
+    // 3/15/2023
+    // For basic block of coverage
+    void generateBasicBlockLayer(stringstream &g, VisualLayer *layer);
+
+    // For loops
     void generateLayer(stringstream &g, VisualLayer *layer);
 
+    // For backbone structure
+    void generateBackBoneMain(std::stringstream &g);
+
+    // All helper
     static void dotWriteEntry(std::stringstream &g, const string &name, const unordered_map<string, string> &attrs);
 
+    // Final function to call to build .png
     static void generateGraphvizImage(const string &dotContent, const string &outputBaseName);
 
     static constexpr int EDGE_WEIGHT_MAPPING_COUNT = 7;
@@ -261,8 +323,6 @@ private:
 
     static int getEdgePenWidth(int count);
 };
-
-
 
 }
 

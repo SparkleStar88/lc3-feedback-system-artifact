@@ -8,6 +8,11 @@
 #include "klc3/Common.h"
 #include "klc3/Core/Executor.h"
 #include "klc3/Loader/Loader.h"
+
+
+#include "klc3/FlowAnalysis/BackBoneAnalyzer.h"
+
+
 #include "klc3/FlowAnalysis/FlowGraph.h"
 #include "klc3/FlowAnalysis/SubroutineTracker.h"
 #include "klc3/FlowAnalysis/LoopAnalyzer.h"
@@ -535,6 +540,9 @@ int main(int argc, char **argv) {
         progInfo() << "============================= END OF LOOPS ============================\n";
 #endif
 
+//
+// Modified by Tianyu
+//
 #if DUMP_LOOPS_TO_FILE
         if (!outputPath.empty()) {
             PathString filename(outputPath);
@@ -556,11 +564,70 @@ int main(int argc, char **argv) {
             llvm::sys::path::append(subdir, "loops");
             llvm::sys::fs::create_directory(subdir);
             FlowGraphVisualizer::visualizeAllLoops(subdir, flowGraph.get(), loopAnalyzer.get());
+            //
+            // Added by Tianyu
+            // We want to abstract the structure of all the loops
+            //
+            FlowGraphVisualizer::abstractAllLoops(subdir, flowGraph.get(), loopAnalyzer.get());
         }
 #endif
     }
 
     PREPARE_SEARCHER:
+    // 
+    // 
+    // 
+    // BACKBONE STARTS HERE
+    std::unique_ptr<BackBoneAnalyzer> backBoneAnalyzer;
+    std::unique_ptr<SCCSet> ss;
+
+    PathString subdir;
+    if (!outputPath.empty()) {
+        llvm::sys::path::append(subdir, outputPath);
+        llvm::sys::path::append(subdir, "backbones");
+        llvm::sys::fs::create_directory(subdir);
+    }
+
+    for (const auto &subroutine : subroutineTracker->getSubroutines()) {
+        backBoneAnalyzer = std::make_unique<BackBoneAnalyzer>(flowGraph.get());
+        ss = std::make_unique<SCCSet>(subroutineTracker->getSubroutineSubgraph(subroutine.name));
+        ss->analysisSCC();
+        // ss contains all nodes in the subroutine
+        backBoneAnalyzer->getBackBoneEntryPoint().first = subroutine.entry;
+        backBoneAnalyzer->getBackBoneEntryPoint().second = nullptr;
+        // backBoneAnalyzer->analyzeBackBone(subroutine.entry, *ss);
+        backBoneAnalyzer->analyzeBackBone(subroutine.entry);
+        backBoneAnalyzer->eliminateCycles(*ss);
+        
+        // Analyze the loops in each BackBoneNode
+        backBoneAnalyzer->analyzeBackBoneNodesLoop();
+
+        progInfo() << "\n";
+        progInfo() << "================================ BACKBONE ================================\n";
+        backBoneAnalyzer->dump(progInfo());
+        progInfo() << "============================= END OF BACKBONE ============================\n";
+
+        if (!subdir.empty()) {
+            PathString filename(subdir);
+            string name = "backbone" + subroutine.name;
+            llvm::sys::path::append(filename, name);
+            std::error_code errorCode;
+            llvm::raw_fd_ostream fs(filename, errorCode, llvm::sys::fs::F_None);
+            if (errorCode) {
+                newProgErr() << "Failed to open " << filename << "\n";
+                return 1;
+            }
+            backBoneAnalyzer->dump(fs);
+            fs.close();
+
+            // visualize
+            PathString graph_name(subdir);
+            string subroutine_name = "backbone_" + subroutine.name;
+            llvm::sys::path::append(graph_name, subroutine_name);
+            FlowGraphVisualizer::visualizeBackBone(graph_name, backBoneAnalyzer.get());
+        }
+    }
+
 
     /// ================================ Prepare Searcher ================================
 
@@ -963,6 +1030,12 @@ int main(int argc, char **argv) {
     if (!outputPath.empty() && GenerateFinalFlowGraph) {
         FlowGraphVisualizer::visualizeCoverage(outputPath, flowGraph.get(), coverageTracker.get());
     }
+
+    // 3/15/2023
+    // Tianyu
+    // if (!outputPath.empty()) {
+    //     FlowGraphVisualizer::visualizeCoverage(outputPath, flowGraph.get(), coverageTracker.get());
+    // }
 
 #if VISUALIZE_SEGMENT_COVERING_PATHS
     if (!outputPath.empty()) {

@@ -13,6 +13,7 @@ klee_add_component(klc3Lib
         Core/Executor.cpp
         Core/MemoryValue.cpp
         Core/MemoryManager.cpp
+        FlowAnalysis/BackBoneAnalyzer.cpp
         FlowAnalysis/FlowGraph.cpp
         FlowAnalysis/CoverageTracker.cpp
         FlowAnalysis/SubroutineTracker.cpp
